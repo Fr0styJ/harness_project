@@ -1,43 +1,43 @@
-import { execSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 /**
- * Cancel all tracked pipeline run IDs immediately.
- * Shells out to `openclaw sessions cancel` for each tracked ID.
+ * Cancel all tracked pipeline runs via OpenClaw CLI.
+ * Fully async — no event loop blocking, no shell interpolation.
  *
- * @param {string[]} trackedIds - Array of session/run IDs to cancel.
- * @returns {Promise<{cancelled: string[], failed: Array<{id: string, error: string}>}>}
+ * @param {string[]} trackedIds - Array of run IDs to cancel.
+ * @returns {Promise<{cancelled: number, failed: number, errors: string[]}>}
  */
 export async function cancelAllRuns(trackedIds) {
-  if (!Array.isArray(trackedIds) || trackedIds.length === 0) {
-    return { cancelled: [], failed: [] };
+  if (!trackedIds || trackedIds.length === 0) {
+    return { cancelled: 0, failed: 0, errors: [] };
   }
 
-  const cancelled = [];
-  const failed = [];
+  let cancelled = 0;
+  let failed = 0;
+  const errors = [];
 
   for (const id of trackedIds) {
-    if (!id || typeof id !== 'string') continue;
+    // Validate ID format — UUIDs only, reject anything with shell metacharacters
+    if (!/^[a-zA-Z0-9\-]+$/.test(id)) {
+      failed++;
+      errors.push(`Rejected invalid run ID: ${id}`);
+      continue;
+    }
 
     try {
-      execSync(`openclaw sessions cancel ${id} 2>&1`, {
+      await execFileAsync('openclaw', ['sessions', 'cancel', id], {
         encoding: 'utf-8',
-        timeout: 15000,
+        timeout: 10000,
       });
-      cancelled.push(id);
+      cancelled++;
     } catch (err) {
-      failed.push({
-        id,
-        error: err.message?.trim() ?? 'Unknown cancellation error',
-      });
+      failed++;
+      errors.push(`Failed to cancel ${id}: ${err.message}`);
     }
   }
 
-  // Log the emergency stop
-  const timestamp = new Date().toISOString();
-  console.error(
-    `[KILLSWITCH] ${timestamp} — Emergency stop triggered. ` +
-    `Cancelled: ${cancelled.length}, Failed: ${failed.length}`
-  );
-
-  return { cancelled, failed };
+  return { cancelled, failed, errors };
 }
