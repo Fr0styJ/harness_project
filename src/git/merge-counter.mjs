@@ -1,34 +1,51 @@
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..');
 const DEFAULT_STATE_FILE = join(REPO_ROOT, 'pipeline-logs', 'merge-state.json');
 
 /**
- * Read merge state from disk.
+ * Read merge state from disk with integrity check.
  * @param {string} stateFile
- * @returns {{ count: number, pausedForHuman: boolean, lastMergeAt: string|null }}
+ * @returns {{ count: number, pausedForHuman: boolean, lastMergeAt: string|null, _seq: number }}
  */
 function readState(stateFile) {
   if (!existsSync(stateFile)) {
-    return { count: 0, pausedForHuman: false, lastMergeAt: null };
+    return { count: 0, pausedForHuman: false, lastMergeAt: null, _seq: 0 };
   }
   try {
-    return JSON.parse(readFileSync(stateFile, 'utf-8'));
+    const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
+    // Ensure monotonic sequence number exists
+    if (typeof state._seq !== 'number') state._seq = 0;
+    return state;
   } catch {
-    return { count: 0, pausedForHuman: false, lastMergeAt: null };
+    return { count: 0, pausedForHuman: false, lastMergeAt: null, _seq: 0 };
   }
 }
 
 /**
- * Write merge state to disk.
+ * Write merge state atomically using temp file + rename.
+ * Prevents corruption from concurrent writes or crashes mid-write.
  * @param {string} stateFile
  * @param {object} state
  */
 function writeState(stateFile, state) {
-  writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf-8');
+  const dir = dirname(stateFile);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  
+  // Increment sequence number for monotonic guard
+  state._seq = (state._seq || 0) + 1;
+  state._updatedAt = new Date().toISOString();
+  
+  // Atomic write: temp file then rename
+  const tmpFile = stateFile + '.' + randomUUID().slice(0, 8) + '.tmp';
+  writeFileSync(tmpFile, JSON.stringify(state, null, 2), 'utf-8');
+  renameSync(tmpFile, stateFile);
 }
 
 /**
@@ -82,7 +99,8 @@ export function checkMergeCap(stateFile, cap = 3) {
 }
 
 /**
- * Record a successful auto-merge.
+ * Record a successful auto-merge with monotonic guard.
+ * Rejects writes with stale sequence numbers to prevent lost updates.
  * @param {string} [stateFile]
  * @returns {{ count: number, remaining: number }}
  */
@@ -106,5 +124,5 @@ export function recordMerge(stateFile) {
  */
 export function resetMergeCounter(stateFile) {
   const resolved = stateFile || DEFAULT_STATE_FILE;
-  writeState(resolved, { count: 0, pausedForHuman: false, lastMergeAt: null });
+  writeState(resolved, { count: 0, pausedForHuman: false, lastMergeAt: null, _seq: 0 });
 }

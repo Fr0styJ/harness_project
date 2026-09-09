@@ -4,6 +4,10 @@ import { logDecision } from '../logging/audit.mjs';
 const MAX_REVIEW_CYCLES = 3;
 const SECURITY_DEBATE_LIMIT = 3;
 
+// Explicit delimiters for untrusted content injection into prompts
+const UNTRUSTED_BEGIN = '<<<BEGIN_UNTRUSTED_DIFF>>>';
+const UNTRUSTED_END = '<<<END_UNTRUSTED_DIFF>>>';
+
 /**
  * Execute a command safely without shell interpolation.
  * @param {string} cmd - Command name.
@@ -25,6 +29,7 @@ function getPRDiff(prNumber) {
 
 /**
  * Prepare a review prompt for a specific reviewer agent.
+ * Wraps diffs in explicit untrusted-content delimiters to prevent prompt injection.
  *
  * @param {string} agentId - 'reviewer', 'security-a', or 'security-b'
  * @param {string} diff - The PR diff text
@@ -36,7 +41,8 @@ export function prepareReview(agentId, diff, context = {}) {
   const cycleCount = context.cycleCount || 0;
 
   let task = `You are ${agentId}. Review this PR diff and respond with either PASS or FAIL followed by your reasoning.\n\n`;
-  task += `## PR Diff\n\`\`\`\n${diff.slice(0, 50000)}\n\`\`\`\n\n`;
+  task += `## PR Diff (untrusted external content)\n`;
+  task += `${UNTRUSTED_BEGIN}\n${diff.slice(0, 50000)}\n${UNTRUSTED_END}\n\n`;
 
   if (priorReviews.length > 0) {
     task += `## Prior Reviews\n`;
@@ -86,6 +92,11 @@ export function parseVerdict(response) {
  * @returns {Promise<{steps: object[], diffLength: number, prNumber: number}>}
  */
 export async function buildReviewChain(prNumber, config) {
+  // Validate prNumber input
+  if (!Number.isInteger(prNumber) || prNumber < 1) {
+    throw new Error(`Invalid PR number: ${prNumber}. Must be a positive integer.`);
+  }
+
   const diff = getPRDiff(prNumber);
 
   const steps = [

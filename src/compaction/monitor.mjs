@@ -7,8 +7,24 @@ const DEFAULT_CONTEXT_LIMIT = 128000;
 const DEBATE_CONTEXT_LIMIT = 80000;
 const COMPACT_AT_PERCENT = 85;
 
+// Strict pattern for session keys: alphanumeric, colons, dots, hyphens, underscores only
+const SESSION_KEY_PATTERN = /^[a-zA-Z0-9_:\.\-]+$/;
+
 const COMPACTION_PROMPT =
   'Your context is approaching the token limit. Summarize the key decisions, current state, and pending tasks from this session so far, then truncate the oldest messages to free space. Preserve all actionable information.';
+
+/**
+ * Validate a session key format to prevent CLI argument injection.
+ * @param {string} sessionKey
+ */
+function validateSessionKey(sessionKey) {
+  if (!sessionKey || typeof sessionKey !== 'string') {
+    throw new Error('Session key must be a non-empty string');
+  }
+  if (!SESSION_KEY_PATTERN.test(sessionKey)) {
+    throw new Error(`Invalid session key format: ${sessionKey}. Only alphanumeric, colons, dots, hyphens, and underscores allowed.`);
+  }
+}
 
 /**
  * Run a command asynchronously, returning trimmed stdout.
@@ -35,6 +51,13 @@ async function runAsync(cmd, args) {
  * @returns {Promise<{compacted: boolean, tokensBefore: number|null, tokensAfter: number|null}>}
  */
 export async function checkAndCompact(sessionKey, thresholds = {}) {
+  // Validate session key before any CLI interaction
+  try {
+    validateSessionKey(sessionKey);
+  } catch (err) {
+    return { compacted: false, tokensBefore: null, tokensAfter: null };
+  }
+
   const contextLimit = thresholds.contextLimit ?? DEFAULT_CONTEXT_LIMIT;
   const compactAtPercent = thresholds.compactAtPercent ?? COMPACT_AT_PERCENT;
   const triggerThreshold = Math.floor(contextLimit * (compactAtPercent / 100));

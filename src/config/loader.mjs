@@ -1,5 +1,30 @@
 import { readFileSync, existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, normalize, sep } from 'node:path';
+
+// Allowed base directories for agent workspaces
+const ALLOWED_BASES = [
+  resolve(process.env.HOME || '/home/ccadmin', '.openclaw/workspaces'),
+  resolve('/tmp'),
+];
+
+/**
+ * Verify a resolved path stays within allowed base directories.
+ * Prevents path traversal attacks.
+ * @param {string} resolvedPath - Absolute resolved path.
+ * @throws {Error} If path escapes allowed bases.
+ */
+function validatePathSafety(resolvedPath) {
+  const normalized = normalize(resolvedPath);
+  const isAllowed = ALLOWED_BASES.some(base => {
+    const normalizedBase = normalize(base);
+    return normalized.startsWith(normalizedBase + sep) || normalized === normalizedBase;
+  });
+  if (!isAllowed) {
+    throw new Error(
+      `Path traversal detected: ${resolvedPath} is outside allowed directories: ${ALLOWED_BASES.join(', ')}`
+    );
+  }
+}
 
 /**
  * Load and validate pipeline.json5 configuration.
@@ -41,8 +66,13 @@ export async function loadConfig(configPath) {
     }
     if (agentDef.workspace) {
       const wsPath = agentDef.workspace.replace(/^~/, process.env.HOME || '/home/ccadmin');
-      if (!existsSync(wsPath)) {
-        throw new Error(`Agent ${agentId} workspace does not exist: ${wsPath}`);
+      const resolvedWs = resolve(wsPath);
+      
+      // Path traversal check
+      validatePathSafety(resolvedWs);
+      
+      if (!existsSync(resolvedWs)) {
+        throw new Error(`Agent ${agentId} workspace does not exist: ${resolvedWs}`);
       }
     }
   }
