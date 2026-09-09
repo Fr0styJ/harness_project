@@ -64,7 +64,7 @@ describe('Calculator - Error Handling', () => {
 });
 
 describe('Graph - SVG Generation', () => {
-  const testSvgPath = join(tmpdir(), `harness-test-graph-${Date.now()}.svg`);
+  const testSvgPath = join(process.cwd(), `test-graph-${Date.now()}.svg`);
 
   it('generates an SVG file', async () => {
     const result = await graph('sin(x)', {

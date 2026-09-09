@@ -5,7 +5,7 @@
 
 import { evaluate } from './calculator.mjs';
 import { writeFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve, relative, isAbsolute } from 'node:path';
 
 /**
  * Render a mathematical expression as an SVG graph.
@@ -32,6 +32,14 @@ export async function graph(expression, options = {}) {
   } = options;
 
   if (!outputPath) throw new Error('outputPath is required');
+
+  // Security: validate outputPath stays within cwd to prevent path traversal
+  const cwd = process.cwd();
+  const resolved = isAbsolute(outputPath) ? resolve(outputPath) : resolve(cwd, outputPath);
+  const rel = relative(cwd, resolved);
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`outputPath must be within the current working directory (got: ${outputPath})`);
+  }
 
   const padding = { top: 30, right: 30, bottom: 40, left: 50 };
   const plotW = width - padding.left - padding.right;
