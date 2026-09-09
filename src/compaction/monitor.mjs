@@ -1,4 +1,7 @@
-import { execSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 const DEFAULT_CONTEXT_LIMIT = 128000;
 const DEBATE_CONTEXT_LIMIT = 80000;
@@ -8,7 +11,22 @@ const COMPACTION_PROMPT =
   'Your context is approaching the token limit. Summarize the key decisions, current state, and pending tasks from this session so far, then truncate the oldest messages to free space. Preserve all actionable information.';
 
 /**
+ * Run a command asynchronously, returning trimmed stdout.
+ * @param {string} cmd
+ * @param {string[]} args
+ * @returns {Promise<string>}
+ */
+async function runAsync(cmd, args) {
+  const { stdout } = await execFileAsync(cmd, args, {
+    encoding: 'utf-8',
+    timeout: 30000,
+  });
+  return stdout.trim();
+}
+
+/**
  * Check a session's token usage against thresholds and trigger compaction if needed.
+ * Fully async — no event loop blocking.
  *
  * @param {string} sessionKey - The OpenClaw session key to check.
  * @param {object} [thresholds] - Optional threshold overrides.
@@ -26,48 +44,47 @@ export async function checkAndCompact(sessionKey, thresholds = {}) {
   let compacted = false;
 
   try {
-    // Query session status via openclaw CLI
-    const raw = execSync(
-      `openclaw sessions status ${sessionKey} --json 2>/dev/null`,
-      { encoding: 'utf-8', timeout: 15000 }
-    );
+    // Query session status via openclaw CLI (async)
+    const raw = await runAsync('openclaw', [
+      'session', 'status',
+      '--session-key', sessionKey,
+      '--json',
+    ]);
 
     const status = JSON.parse(raw);
-    tokensBefore = status?.tokensUsed ?? status?.tokenCount ?? null;
+    tokensBefore = status.tokens?.total ?? status.usage?.totalTokens ?? null;
 
     if (tokensBefore === null) {
       return { compacted: false, tokensBefore: null, tokensAfter: null };
     }
 
     if (tokensBefore >= triggerThreshold) {
-      // Inject summarization prompt into the session
-      execSync(
-        `openclaw sessions send ${sessionKey} ${JSON.stringify(COMPACTION_PROMPT)} 2>/dev/null`,
-        { encoding: 'utf-8', timeout: 30000 }
-      );
+      // Trigger compaction by sending a summarization prompt (async)
+      await runAsync('openclaw', [
+        'session', 'send',
+        '--session-key', sessionKey,
+        '--message', COMPACTION_PROMPT,
+      ]);
       compacted = true;
 
-      // Re-check after compaction attempt
+      // Give the session a moment to process, then re-check
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
       try {
-        const afterRaw = execSync(
-          `openclaw sessions status ${sessionKey} --json 2>/dev/null`,
-          { encoding: 'utf-8', timeout: 15000 }
-        );
-        const afterStatus = JSON.parse(afterRaw);
-        tokensAfter = afterStatus?.tokensUsed ?? afterStatus?.tokenCount ?? null;
+        const rawAfter = await runAsync('openclaw', [
+          'session', 'status',
+          '--session-key', sessionKey,
+          '--json',
+        ]);
+        const statusAfter = JSON.parse(rawAfter);
+        tokensAfter = statusAfter.tokens?.total ?? statusAfter.usage?.totalTokens ?? null;
       } catch {
-        // Post-compaction check failed; still report as compacted
         tokensAfter = null;
       }
     }
   } catch (err) {
-    // Session query or send failed — return what we have
-    return {
-      compacted: false,
-      tokensBefore,
-      tokensAfter: null,
-      error: err.message,
-    };
+    // Session may not exist or be accessible; return gracefully
+    return { compacted: false, tokensBefore: null, tokensAfter: null };
   }
 
   return { compacted, tokensBefore, tokensAfter };

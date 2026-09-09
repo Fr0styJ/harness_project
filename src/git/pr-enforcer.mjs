@@ -1,85 +1,100 @@
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 
 const PROTECTED_BRANCH = 'main';
 
 /**
- * Execute a shell command synchronously, returning trimmed stdout.
- * Throws on non-zero exit.
+ * Execute a gh CLI command safely using execFileSync (no shell interpolation).
+ * @param {string[]} args - Arguments array passed directly to gh.
+ * @returns {string} Trimmed stdout.
  */
-function run(cmd, opts = {}) {
-  return execSync(cmd, {
+function gh(args) {
+  const result = execFileSync('gh', args, {
     encoding: 'utf-8',
     timeout: 30000,
-    ...opts,
-  }).trim();
+  });
+  return result.trim();
 }
 
 /**
  * Create a feature branch, push commits, and open a PR via gh CLI.
- * Blocks direct pushes to main.
+ * Uses file-based title/body to prevent shell injection.
  *
- * @param {string} branch - Feature branch name to create/push.
+ * @param {string} branch - Feature branch name.
  * @param {string} title - PR title.
  * @param {string} body - PR body/description.
- * @returns {Promise<{prNumber: number|null, url: string|null}>}
+ * @returns {{ prNumber: number, url: string }}
  */
 export async function createPR(branch, title, body) {
-  if (!branch || typeof branch !== 'string') {
-    throw new Error('Branch name is required');
-  }
+  // Safety check: never allow direct push to protected branch
   if (branch === PROTECTED_BRANCH) {
-    throw new Error(`Direct pushes to ${PROTECTED_BRANCH} are blocked. Use a feature branch.`);
+    throw new Error(`Direct operations on '${PROTECTED_BRANCH}' are blocked. Use a feature branch.`);
   }
 
-  // Ensure we're not accidentally on main with uncommitted changes
-  const currentBranch = run('git rev-parse --abbrev-ref HEAD');
-  if (currentBranch === PROTECTED_BRANCH) {
-    throw new Error(
-      `Cannot create PR from ${PROTECTED_BRANCH}. Switch to a feature branch first.`
-    );
+  // Validate branch name (alphanumeric, hyphens, underscores, slashes only)
+  if (!/^[a-zA-Z0-9_\-\/]+$/.test(branch)) {
+    throw new Error(`Invalid branch name: ${branch}. Only alphanumeric, hyphens, underscores, and slashes allowed.`);
   }
 
-  // Create and checkout the feature branch if it doesn't exist yet
+  // Write title and body to temp files to avoid shell injection
+  const tmpDir = tmpdir();
+  const id = randomUUID().slice(0, 8);
+  const titleFile = join(tmpDir, `pr-title-${id}.txt`);
+  const bodyFile = join(tmpDir, `pr-body-${id}.txt`);
+
   try {
-    run(`git rev-parse --verify ${branch} 2>/dev/null`);
-    // Branch exists, just switch to it
-    run(`git checkout ${branch}`);
+    writeFileSync(titleFile, title, 'utf-8');
+    writeFileSync(bodyFile, body, 'utf-8');
+
+    // Create PR using --title-file and --body-file (safe from injection)
+    const output = gh([
+      'pr', 'create',
+      '--base', PROTECTED_BRANCH,
+      '--head', branch,
+      '--title-file', titleFile,
+      '--body-file', bodyFile,
+    ]);
+
+    // Parse PR number and URL from gh output
+    // gh pr create outputs the URL on success
+    const urlMatch = output.match(/https:\/\/github\.com\/[^\s]+\/pull\/(\d+)/);
+    const prNumber = urlMatch ? parseInt(urlMatch[1], 10) : null;
+
+    return {
+      prNumber,
+      url: urlMatch ? urlMatch[0] : output,
+    };
+  } finally {
+    // Clean up temp files
+    try { unlinkSync(titleFile); } catch {}
+    try { unlinkSync(bodyFile); } catch {}
+  }
+}
+
+/**
+ * Check if a branch exists locally.
+ * @param {string} branch
+ * @returns {boolean}
+ */
+export function branchExists(branch) {
+  try {
+    gh(['branch', '--list', branch]);
+    return true;
   } catch {
-    // Branch doesn't exist, create it
-    run(`git checkout -b ${branch}`);
+    return false;
   }
+}
 
-  // Push the branch to origin
-  run(`git push origin ${branch}`);
-
-  // Create the PR via gh CLI
-  const escapedTitle = title.replace(/"/g, '\\"');
-  const escapedBody = body.replace(/"/g, '\\"');
-
-  const prOutput = run(
-    `gh pr create --base ${PROTECTED_BRANCH} --head ${branch} --title "${escapedTitle}" --body "${escapedBody}"`
-  );
-
-  // gh pr create outputs the PR URL on success
-  const url = prOutput.startsWith('http') ? prOutput : null;
-
-  // Extract PR number from URL or via gh
-  let prNumber = null;
-  if (url) {
-    const match = url.match(/\/pull\/(\d+)/);
-    if (match) prNumber = parseInt(match[1], 10);
+/**
+ * Push current branch to remote.
+ * @param {string} branch
+ */
+export async function pushBranch(branch) {
+  if (branch === PROTECTED_BRANCH) {
+    throw new Error(`Direct push to '${PROTECTED_BRANCH}' is blocked.`);
   }
-
-  if (!prNumber) {
-    try {
-      const numStr = run(
-        `gh pr view ${branch} --json number --jq '.number'`
-      );
-      prNumber = parseInt(numStr, 10) || null;
-    } catch {
-      // Could not extract PR number
-    }
-  }
-
-  return { prNumber, url };
+  gh(['push', 'origin', branch]);
 }

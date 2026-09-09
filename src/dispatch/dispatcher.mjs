@@ -1,12 +1,14 @@
-import { execSync } from 'node:child_process';
-import { resolveModel } from '../config/loader.mjs';
 import { logDecision } from '../logging/audit.mjs';
 
 /** @type {Set<string>} */
 const trackedRuns = new Set();
 
 /**
- * Dispatch a task to a builder agent via OpenClaw sessions_spawn.
+ * Dispatch a task to a builder agent.
+ *
+ * This module prepares spawn parameters and tracks run IDs.
+ * The actual sessions_spawn call is made by the Coding Manager,
+ * since subagents cannot call sessions_spawn themselves.
  *
  * @param {object} taskDef - Task definition.
  * @param {string} taskDef.title - Short task title.
@@ -15,16 +17,20 @@ const trackedRuns = new Set();
  * @param {string} [taskDef.branch] - Git branch name to work on.
  * @param {string[]} [taskDef.files] - Files this task is expected to touch.
  * @param {object} config - Loaded pipeline config.
- * @returns {Promise<{runId: string|null, sessionKey: string|null, status: string}>}
+ * @returns {Promise<{params: object, fallbacks: string[], status: string}>}
  */
 export async function dispatchTask(taskDef, config) {
-  const { model, fallbacks } = resolveModel(config, taskDef.targetAgent);
-  const workspace = config.agents[taskDef.targetAgent]?.workspace || '.';
+  const agent = config.agents[taskDef.targetAgent];
+  if (!agent) {
+    throw new Error(`Unknown agent: ${taskDef.targetAgent}`);
+  }
+
+  const model = agent.model;
+  const fallbacks = agent.fallbacks || [];
+  const workspace = agent.workspace || '.';
   const wsPath = workspace.replace(/^~/, process.env.HOME || '/home/ccadmin');
 
-  // Build the spawn command via openclaw CLI
-  // In practice, the Coding Manager calls sessions_spawn directly.
-  // This module prepares the parameters and tracks the run.
+  // Build the spawn parameters that the Coding Manager will pass to sessions_spawn
   const spawnParams = {
     task: taskDef.description,
     label: `${taskDef.targetAgent}: ${taskDef.title}`,
@@ -35,18 +41,10 @@ export async function dispatchTask(taskDef, config) {
     model,
   };
 
-  const result = {
-    runId: null,
-    sessionKey: null,
-    status: 'prepared',
-    params: spawnParams,
-    fallbacks,
-  };
-
   await logDecision({
     runId: 'pending',
     agent: taskDef.targetAgent,
-    action: 'dispatch',
+    action: 'dispatch-prepared',
     verdict: 'prepared',
     timestamp: new Date().toISOString(),
     metadata: {
@@ -57,11 +55,15 @@ export async function dispatchTask(taskDef, config) {
     },
   });
 
-  return result;
+  return {
+    params: spawnParams,
+    fallbacks,
+    status: 'ready-to-spawn',
+  };
 }
 
 /**
- * Register a run ID for kill switch tracking.
+ * Register a run ID for kill switch tracking after Coding Manager spawns.
  * @param {string} runId
  */
 export function trackRun(runId) {

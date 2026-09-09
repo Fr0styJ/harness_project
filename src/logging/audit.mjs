@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, appendFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,58 +17,38 @@ function ensureLogDir() {
 }
 
 /**
- * Build the log filename: YYYY-MM-DD-<runId>.json
+ * Build the log filename: YYYY-MM-DD.jsonl (one file per day, append-only).
+ * @returns {string}
  */
-function buildFilename(runId) {
-  const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const safeRunId = String(runId).replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `${date}-${safeRunId}.json`;
+function getLogPath() {
+  const date = new Date().toISOString().slice(0, 10);
+  return join(LOG_DIR, `${date}.jsonl`);
 }
 
 /**
- * Write a structured JSON decision record to pipeline-logs/.
+ * Log a structured decision/event record.
+ * Uses JSONL (append-only) format for safe concurrent writes.
  *
- * @param {object} event - The decision event to log.
+ * @param {object} event - Decision/event record.
  * @param {string} event.runId - Pipeline run identifier.
  * @param {string} event.agent - Agent that made the decision.
- * @param {string} event.action - Action taken.
- * @param {string} [event.verdict] - Verdict if applicable (pass/fail/escalated).
- * @param {string} [event.timestamp] - ISO timestamp; auto-generated if omitted.
+ * @param {string} event.action - What action was taken.
+ * @param {string} event.verdict - Outcome (pass/fail/pending/etc).
+ * @param {string} event.timestamp - ISO timestamp.
  * @param {object} [event.metadata] - Additional context.
- * @returns {Promise<{path: string, event: object}>}
  */
 export async function logDecision(event) {
-  if (!event || typeof event !== 'object') {
-    throw new Error('logDecision requires an event object');
-  }
-  if (!event.runId) {
-    throw new Error('event.runId is required');
-  }
-
   ensureLogDir();
 
   const record = {
-    ...event,
-    timestamp: event.timestamp ?? new Date().toISOString(),
+    timestamp: event.timestamp || new Date().toISOString(),
+    runId: event.runId || 'unknown',
+    agent: event.agent || 'unknown',
+    action: event.action || 'unknown',
+    verdict: event.verdict || 'unknown',
+    metadata: event.metadata || {},
   };
 
-  const filename = buildFilename(record.runId);
-  const filepath = join(LOG_DIR, filename);
-
-  // Append to existing log file for this run, or create new one
-  let entries = [];
-  if (existsSync(filepath)) {
-    try {
-      const existing = JSON.parse(readFileSync(filepath, 'utf-8'));
-      entries = Array.isArray(existing) ? existing : [existing];
-    } catch {
-      // Corrupted file — start fresh but don't lose data silently
-      entries = [];
-    }
-  }
-
-  entries.push(record);
-  writeFileSync(filepath, JSON.stringify(entries, null, 2) + '\n', 'utf-8');
-
-  return { path: filepath, event: record };
+  const line = JSON.stringify(record) + '\n';
+  appendFileSync(getLogPath(), line, 'utf-8');
 }
