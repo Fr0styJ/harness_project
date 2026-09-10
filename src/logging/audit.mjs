@@ -8,9 +8,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..');
 const LOG_DIR = join(REPO_ROOT, 'pipeline-logs');
 
-// HMAC key for log integrity chain — derived from a fixed seed.
-// In production, this should come from env or secrets store.
-const INTEGRITY_KEY = process.env.PIPELINE_LOG_KEY || 'harness-pipeline-integrity-v1';
+// HMAC key for log integrity chain. Required — no fallback. A hardcoded
+// fallback key would let anyone with repo read access forge/rewrite the
+// audit chain undetected, defeating the whole point of HMAC chaining.
+const INTEGRITY_KEY = process.env.PIPELINE_LOG_KEY;
+if (!INTEGRITY_KEY) {
+  throw new Error(
+    'PIPELINE_LOG_KEY is not set. The audit log integrity chain requires a real ' +
+    'secret key (no fallback is permitted). Set PIPELINE_LOG_KEY in the gateway ' +
+    'service environment before running any pipeline agent that logs decisions.'
+  );
+}
 
 /**
  * Ensure the log directory exists.
